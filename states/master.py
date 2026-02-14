@@ -1,0 +1,6 @@
+from aiogram.fsm.state import State, StatesGroup
+
+class CreateAgentSG(StatesGroup):
+    waiting_token = State()
+    waiting_prompt = State()
+    waiting_docs = State()

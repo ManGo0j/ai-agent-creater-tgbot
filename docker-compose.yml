@@ -1,0 +1,57 @@
+version: "3.8"
+
+services:
+  # Реляционная база данных
+  db:
+    image: postgres:15-alpine
+    container_name: ai_factory_db
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: saas_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Векторная база данных
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ai_factory_qdrant
+    restart: always
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # Ваше приложение
+  app:
+    build: .
+    container_name: ai_factory_app
+    restart: always
+    depends_on:
+      - db
+      - qdrant
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - ./temp_uploads:/app/temp_uploads
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: always
+    command:
+      - "http"
+      - "app:8000"
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    depends_on:
+      - app
+volumes:
+  postgres_data:
+  qdrant_data:
