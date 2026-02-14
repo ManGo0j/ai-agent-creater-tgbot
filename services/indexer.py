@@ -1,5 +1,6 @@
 import os
 import asyncio
+import uuid  # Добавлен импорт для генерации валидных UUID
 import pdfplumber
 from docx import Document
 from typing import List
@@ -12,11 +13,11 @@ from fastembed import TextEmbedding, SparseTextEmbedding
 
 from database.db import async_session
 from database.models import AgentDocument
-from core.config import settings # Предполагаем наличие конфига с ключами
+from core.config import settings
 
-# Инициализация клиентов (в идеале вынести в отдельный service_manager)
+# Инициализация клиентов
 qdrant_client = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
-dense_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5") # Как в исходном коде
+dense_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5") 
 sparse_model = SparseTextEmbedding(model_name="prithivida/Splade_PP_en_v1")
 
 text_splitter = RecursiveCharacterTextSplitter(
@@ -29,7 +30,6 @@ async def extract_text(file_path: str) -> str:
     """Извлекает текст в зависимости от расширения файла."""
     ext = os.path.splitext(file_path)[1].lower()
     text = ""
-    
     if ext == ".pdf":
         with pdfplumber.open(file_path) as pdf:
             text = "".join([page.extract_text() or "" for page in pdf.pages])
@@ -58,22 +58,27 @@ async def process_document(file_path: str, agent_id: int, document_id: int):
         # 3. Генерация эмбеддингов и загрузка в Qdrant
         points = []
         for i, chunk_text in enumerate(chunks):
-            # Генерируем векторы (в продакшене лучше делать батчами)
+            # Генерируем векторы
             dense_vector = list(dense_model.embed([chunk_text]))[0]
             sparse_vector = list(sparse_model.embed([chunk_text]))[0]
 
+            # ИСПРАВЛЕНИЕ: Генерируем валидный UUID на основе document_id и индекса чанка
+            # Это решает ошибку "value 1_0 is not a valid point ID"
+            point_id = str(uuid.uuid5(uuid.NAMESPACE_DNS, f"{document_id}_{i}"))
+
             points.append(
                 models.PointStruct(
-                    id=f"{document_id}_{i}", # Уникальный ID точки
+                    id=point_id,
+                    # Исправленный синтаксис передачи векторов:
                     vector={
-                        "default": dense_vector.tolist(),
+                        "": dense_vector.tolist(),  # Безымянный (основной) вектор
                         "sparse-text": models.SparseVector(
                             indices=sparse_vector.indices.tolist(),
                             values=sparse_vector.values.tolist()
                         )
                     },
                     payload={
-                        "agent_id": agent_id,      # Ключевое поле для фильтрации
+                        "agent_id": agent_id,
                         "document_id": document_id,
                         "text": chunk_text,
                         "source": os.path.basename(file_path)
@@ -81,7 +86,7 @@ async def process_document(file_path: str, agent_id: int, document_id: int):
                 )
             )
 
-        # Загружаем в Qdrant (коллекция должна быть создана заранее или создаваться динамически)
+        # Загружаем в Qdrant
         qdrant_client.upsert(
             collection_name="agent_documents",
             points=points

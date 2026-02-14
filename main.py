@@ -12,6 +12,8 @@ from database.db import async_session, engine, Base
 from sqlalchemy import select
 from database.models import Agent
 from core.config import settings
+from qdrant_client import QdrantClient
+from qdrant_client.http import models
 
 app = FastAPI()
 
@@ -34,16 +36,48 @@ agent_dp.include_router(agent_router)
 # --- События старта и остановки FastAPI ---
 @app.on_event("startup")
 async def on_startup():
-    # Автоматическое создание таблиц в БД
+    # 1. Инициализация таблиц Postgres
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     print("✅ База данных инициализирована")
 
-    # Автоматическая установка вебхука для Мастер-бота
+    # 2. Инициализация коллекции Qdrant
+    client = QdrantClient(url=os.getenv("QDRANT_URL"), api_key=os.getenv("QDRANT_API_KEY"))
+    collection_name = "agent_documents"
+    
+    try:
+        collections = client.get_collections().collections
+        exists = any(c.name == collection_name for c in collections)
+        
+        # ЕСЛИ ОШИБКА ПОВТОРЯЕТСЯ: Раскомментируй строку ниже на один запуск
+        client.delete_collection(collection_name); exists = False
+
+        if not exists:
+            print(f"📡 Создаю коллекцию Qdrant: {collection_name}...")
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=models.VectorParams(
+                    size=384,  # Размерность для BAAI/bge-small-en-v1.5
+                    distance=models.Distance.COSINE
+                ),
+                # Настройка именованного sparse-вектора (как в твоем индексере)
+                sparse_vectors_config={
+                    "sparse-text": models.SparseVectorParams(
+                        index=models.SparseIndexParams(on_disk=True)
+                    )
+                }
+            )
+            print(f"✅ Коллекция {collection_name} создана")
+        else:
+            print(f"✅ Коллекция {collection_name} уже существует")
+            
+    except Exception as e:
+        print(f"⚠️ Ошибка при проверке/создании коллекции Qdrant: {e}")
+
+    # 3. Установка вебхука для Мастер-бота
     webhook_url = f"{settings.BASE_URL}/webhook/master"
     await master_bot.set_webhook(url=webhook_url, drop_pending_updates=True)
     print(f"✅ Вебхук Мастер-бота установлен на: {webhook_url}")
-
 @app.on_event("shutdown")
 async def on_shutdown():
     await master_dp.storage.close()
