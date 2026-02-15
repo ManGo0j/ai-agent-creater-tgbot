@@ -50,7 +50,8 @@ async def on_startup():
         exists = any(c.name == collection_name for c in collections)
         
         # ЕСЛИ ОШИБКА ПОВТОРЯЕТСЯ: Раскомментируй строку ниже на один запуск
-        client.delete_collection(collection_name); exists = False
+        # client.delete_collection(collection_name); 
+        # exists = False
 
         if not exists:
             print(f"📡 Создаю коллекцию Qdrant: {collection_name}...")
