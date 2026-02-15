@@ -11,6 +11,7 @@ from core.crypto import encrypt_token
 from services.indexer import process_document
 from states.master import CreateAgentSG
 from keyboards.master_kb import get_main_menu
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 master_router = Router()
 
@@ -153,3 +154,103 @@ async def handle_docs(message: types.Message, state: FSMContext, session: AsyncS
 async def finish_setup(message: types.Message, state: FSMContext, session: AsyncSession):
     await state.clear()
     await cmd_start(message, session)
+
+# --- МОИ АГЕНТЫ (СПИСОК) ---
+
+@master_router.callback_query(F.data == "my_agents")
+async def show_my_agents(callback: types.CallbackQuery, session: AsyncSession):
+    tg_id = callback.from_user.id
+    
+    # Получаем внутренний ID пользователя
+    user_res = await session.execute(select(User.id).where(User.telegram_id == tg_id))
+    user_id = user_res.scalar_one_or_none()
+    
+    if not user_id:
+        await callback.answer("Ошибка: пользователь не найден.", show_alert=True)
+        return
+
+    # Достаем всех агентов этого пользователя
+    agents_res = await session.execute(select(Agent).where(Agent.owner_id == user_id))
+    agents = agents_res.scalars().all()
+
+    # Если агентов нет
+    if not agents:
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="➕ Создать агента", callback_data="add_agent")],
+            [types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="start_menu")]
+        ])
+        await callback.message.edit_text(" У вас пока нет созданных ботов.\nСамое время создать первого!", reply_markup=kb)
+        return
+
+    # Если агенты есть, собираем клавиатуру через Builder
+    builder = InlineKeyboardBuilder()
+    for agent in agents:
+        # Название кнопки: юзернейм или просто ID
+        bot_name = f"@{agent.bot_username}" if agent.bot_username else f"Агент #{agent.id}"
+        # В callback_data зашиваем ID конкретного агента
+        builder.button(text=bot_name, callback_data=f"agent_info_{agent.id}")
+    
+    # Делаем по 1 кнопке в ряд
+    builder.adjust(1)
+    # Добавляем кнопку возврата в конце
+    builder.row(types.InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="start_menu"))
+
+    await callback.message.edit_text(
+        "🤖 *Ваши агенты:*\nВыберите бота для просмотра подробной информации:", 
+        reply_markup=builder.as_markup(), 
+        parse_mode="Markdown"
+    )
+
+# --- ИНФОРМАЦИЯ О КОНКРЕТНОМ АГЕНТЕ ---
+
+@master_router.callback_query(F.data.startswith("agent_info_"))
+async def show_agent_info(callback: types.CallbackQuery, session: AsyncSession):
+    # Достаем ID агента из callback_data (например, из "agent_info_5" получим 5)
+    agent_id = int(callback.data.split("_")[2])
+    
+    # Загружаем данные агента
+    agent_res = await session.execute(select(Agent).where(Agent.id == agent_id))
+    agent = agent_res.scalar_one_or_none()
+    
+    if not agent:
+        await callback.answer("Агент не найден в базе.", show_alert=True)
+        return
+
+    # Считаем количество загруженных в него файлов
+    docs_res = await session.execute(
+        select(func.count(AgentDocument.id)).where(AgentDocument.agent_id == agent_id)
+    )
+    docs_count = docs_res.scalar()
+
+    # Подготовка текста (экранируем спецсимволы, чтобы Markdown не сломался)
+    bot_name = escape_md(agent.bot_username) if agent.bot_username else "Неизвестно"
+    status = "✅ Активен" if agent.is_active else "❌ Выключен"
+    
+    # Обрезаем системный промпт, если он слишком длинный
+    prompt_text = agent.system_prompt
+    if len(prompt_text) > 250:
+        prompt_text = prompt_text[:250] + "..."
+    prompt = escape_md(prompt_text)
+
+    text = (
+        f"🤖 *Карточка агента*\n\n"
+        f"🔗 *Бот:* @{bot_name}\n"
+        f"📊 *Статус:* {status}\n"
+        f"📚 *Файлов в базе:* {docs_count}\n\n"
+        f"🧠 *Системная инструкция (промпт):*\n_{prompt}_"
+    )
+
+    # Клавиатура управления конкретным агентом
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        # В будущем сюда можно добавить кнопки:
+        # [types.InlineKeyboardButton(text="📝 Изменить промпт", callback_data=f"edit_prompt_{agent.id}")],
+        # [types.InlineKeyboardButton(text="🗑 Удалить бота", callback_data=f"delete_agent_{agent.id}")],
+        [types.InlineKeyboardButton(text="⬅️ К списку агентов", callback_data="my_agents")],
+        [types.InlineKeyboardButton(text="🏠 Назад в меню", callback_data="start_menu")]
+    ])
+
+    try:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+    except Exception as e:
+        # Резервный вариант вывода, если текст крашнет Markdown
+        await callback.message.edit_text(text.replace("*", "").replace("_", ""), reply_markup=kb)
