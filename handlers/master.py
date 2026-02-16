@@ -256,11 +256,14 @@ async def show_agent_info(callback: types.CallbackQuery, session: AsyncSession):
     )
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [
-            types.InlineKeyboardButton(text=toggle_label, callback_data=f"toggle_agent_{agent_id}"),
-            types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"confirm_delete_{agent_id}")
-        ],
-        [types.InlineKeyboardButton(text="⬅️ К списку агентов", callback_data="my_agents")]
+            [
+                types.InlineKeyboardButton(text="📝 Изменить промпт", callback_data=f"edit_prompt_{agent_id}")
+            ],
+            [
+                types.InlineKeyboardButton(text=toggle_label, callback_data=f"toggle_agent_{agent_id}"),
+                types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"confirm_delete_{agent_id}")
+            ],
+            [types.InlineKeyboardButton(text="⬅️ К списку агентов", callback_data="my_agents")]
     ])
 
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
@@ -381,3 +384,51 @@ async def delete_agent(callback: types.CallbackQuery, session: AsyncSession):
             await callback.answer("Произошла ошибка при удалении.", show_alert=True)
     else:
         await callback.answer("Агент не найден.")
+
+# --- РЕДАКТИРОВАНИЕ ПРОМПТА ---
+
+@master_router.callback_query(F.data.startswith("edit_prompt_"))
+async def start_edit_prompt(callback: types.CallbackQuery, state: FSMContext):
+    agent_id = int(callback.data.split("_")[2])
+    
+    await state.update_data(edit_agent_id=agent_id)
+    await state.set_state(CreateAgentSG.editing_prompt)
+    
+    await callback.message.answer(
+        "📝 *Режим редактирования промпта*\n\n"
+        "Пришли мне новый системный промпт для этого бота.\n"
+        "Чтобы отменить, нажми /start",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@master_router.message(CreateAgentSG.editing_prompt)
+async def process_new_prompt(message: types.Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    agent_id = data.get('edit_agent_id')
+    
+    if not agent_id:
+        await message.answer("Ошибка: ID агента потерян. Попробуй заново через меню.")
+        await state.clear()
+        return
+
+    # Обновляем промпт в базе
+    await session.execute(
+        update(Agent).where(Agent.id == agent_id).values(system_prompt=message.text)
+    )
+    await session.commit()
+    
+    await state.clear()
+    
+    # Сразу показываем обновленную карточку агента
+    # Для этого имитируем callback
+    fake_callback = types.CallbackQuery(
+        id="0",
+        from_user=message.from_user,
+        chat_instance="0",
+        message=message,
+        data=f"agent_info_{agent_id}"
+    )
+    
+    await message.answer("✅ Системный промпт успешно обновлен!")
+    await show_agent_info(fake_callback, session)
