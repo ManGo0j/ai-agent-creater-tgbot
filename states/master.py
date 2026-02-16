@@ -5,3 +5,4 @@ class CreateAgentSG(StatesGroup):
     waiting_prompt = State()
     waiting_docs = State()
     editing_prompt = State()
+    adding_extra_docs = State()

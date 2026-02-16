@@ -462,6 +462,7 @@ async def show_knowledge_base(callback: types.CallbackQuery, session: AsyncSessi
     
     # Кнопки навигации
     # builder.row(types.InlineKeyboardButton(text="➕ Добавить файл", callback_data=f"add_doc_{agent_id}")) # Задел на будущее
+    builder.row(types.InlineKeyboardButton(text="➕ Добавить файл", callback_data=f"add_doc_{agent_id}"))
     builder.row(types.InlineKeyboardButton(text="⬅️ Назад к агенту", callback_data=f"agent_info_{agent_id}"))
 
     text = (
@@ -530,4 +531,84 @@ async def force_delete_document(callback: types.CallbackQuery, session: AsyncSes
         id="0", from_user=callback.from_user, chat_instance="0",
         message=callback.message, data=f"edit_kb_{agent_id}"
     )
+    await show_knowledge_base(fake_callback, session)
+
+# --- ДОБАВЛЕНИЕ НОВОГО ДОКУМЕНТА (ЗАПРОС) ---
+
+@master_router.callback_query(F.data.startswith("add_doc_"))
+async def prompt_add_document(callback: types.CallbackQuery, state: FSMContext):
+    agent_id = int(callback.data.split("_")[2])
+    
+    # Запоминаем, какому агенту добавляем файл
+    await state.update_data(edit_agent_id=agent_id)
+    await state.set_state(CreateAgentSG.adding_extra_docs)
+    
+    # Кнопка отмены, чтобы вернуться в список документов
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="❌ Отмена", callback_data=f"edit_kb_{agent_id}")]
+    ])
+    
+    await callback.message.edit_text(
+        "📂 *Добавление нового файла*\n\n"
+        "Отправьте мне документ (PDF, TXT, DOCX), который нужно загрузить в базу знаний.\n"
+        "Можно отправлять по одному файлу.",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+# --- ПРИЕМ И ОБРАБОТКА НОВОГО ДОКУМЕНТА ---
+
+@master_router.message(CreateAgentSG.adding_extra_docs, F.document)
+async def process_extra_document(message: types.Message, state: FSMContext, session: AsyncSession, bot: Bot):
+    data = await state.get_data()
+    agent_id = data.get('edit_agent_id')
+    
+    if not agent_id:
+        await message.answer("❌ Ошибка: потерян ID агента. Начните сначала.")
+        await state.clear()
+        return
+
+    file_name = message.document.file_name
+    file_id = message.document.file_id
+
+    msg = await message.answer(f"⏳ Начинаю загрузку и обработку файла `{file_name}`...")
+
+    try:
+        # 1. Добавляем запись в БД Postgres
+        new_doc = AgentDocument(
+            agent_id=agent_id, 
+            file_name=file_name, 
+            file_id=file_id, 
+            status="processing"
+        )
+        session.add(new_doc)
+        await session.commit() # Фиксируем, чтобы получить ID
+
+        # 2. Скачиваем файл во временную папку
+        os.makedirs("temp_uploads", exist_ok=True)
+        file_path = f"temp_uploads/{file_id}_{file_name}"
+        await bot.download(message.document, destination=file_path)
+
+        # 3. ВАЖНО: Используем правильную функцию из вашего indexer.py
+        from services.indexer import process_document
+        
+        # Запускаем фоновую задачу (чтобы не вешать бота на время обработки)
+        asyncio.create_task(process_document(file_path, agent_id, new_doc.id))
+
+        await msg.edit_text(f"✅ Файл `{file_name}` успешно принят и обрабатывается!")
+
+    except Exception as e:
+        print(f"❌ Ошибка в process_extra_document: {e}")
+        await msg.edit_text(f"❌ Ошибка при обработке файла: {e}")
+
+    # Возврат в меню базы знаний
+    fake_callback = types.CallbackQuery(
+        id="0", 
+        from_user=message.from_user, 
+        chat_instance="0",
+        message=message, 
+        data=f"edit_kb_{agent_id}"
+    )
+    # Импортируем функцию здесь, чтобы избежать кругового импорта
+    from handlers.master import show_knowledge_base
     await show_knowledge_base(fake_callback, session)

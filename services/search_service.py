@@ -4,6 +4,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models
 from fastembed import TextEmbedding, SparseTextEmbedding
 from services.ai_service import rewrite_query
+from core.config import q_client
 
 # Инициализируем асинхронный клиент
 q_client = AsyncQdrantClient(
@@ -95,5 +96,5 @@ async def delete_document_vectors(document_id: int):
         )
         return True
     except Exception as e:
-        print(f"❌ Ошибка при удалении векторов документа из Qdrant: {e}")
+        print(f"❌ Ошибка при удалении векторов документа: {e}")
         return False
