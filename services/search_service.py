@@ -58,3 +58,23 @@ async def search_knowledge_base(query: str, agent_id: int, limit: int = 5) -> Li
         import traceback
         traceback.print_exc()
         return []
+# Добавьте в конец services/search_service.py
+
+async def delete_agent_vectors(agent_id: int):
+    """Удаляет все векторы, принадлежащие конкретному агенту."""
+    try:
+        await q_client.delete(
+            collection_name="agent_documents",
+            points_selector=models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="agent_id",
+                        match=models.MatchValue(value=agent_id),
+                    )
+                ]
+            ),
+        )
+        return True
+    except Exception as e:
+        print(f"❌ Ошибка при удалении векторов из Qdrant: {e}")
+        return False

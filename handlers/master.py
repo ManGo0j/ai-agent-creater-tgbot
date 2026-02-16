@@ -12,6 +12,8 @@ from services.indexer import process_document
 from states.master import CreateAgentSG
 from keyboards.master_kb import get_main_menu
 from aiogram.utils.keyboard import InlineKeyboardBuilder
+from core.crypto import decrypt_token  
+from services.search_service import delete_agent_vectors
 
 master_router = Router()
 
@@ -205,52 +207,147 @@ async def show_my_agents(callback: types.CallbackQuery, session: AsyncSession):
 
 @master_router.callback_query(F.data.startswith("agent_info_"))
 async def show_agent_info(callback: types.CallbackQuery, session: AsyncSession):
-    # Достаем ID агента из callback_data (например, из "agent_info_5" получим 5)
     agent_id = int(callback.data.split("_")[2])
     
-    # Загружаем данные агента
     agent_res = await session.execute(select(Agent).where(Agent.id == agent_id))
     agent = agent_res.scalar_one_or_none()
     
     if not agent:
-        await callback.answer("Агент не найден в базе.", show_alert=True)
+        await callback.answer("Агент не найден.", show_alert=True)
         return
 
-    # Считаем количество загруженных в него файлов
     docs_res = await session.execute(
         select(func.count(AgentDocument.id)).where(AgentDocument.agent_id == agent_id)
     )
     docs_count = docs_res.scalar()
 
-    # Подготовка текста (экранируем спецсимволы, чтобы Markdown не сломался)
-    bot_name = escape_md(agent.bot_username) if agent.bot_username else "Неизвестно"
-    status = "✅ Активен" if agent.is_active else "❌ Выключен"
+    bot_name = escape_md(agent.bot_username) if agent.bot_username else "Бот"
+    status_text = "✅ Активен" if agent.is_active else "❌ Отключен"
+    toggle_label = "🔴 Отключить" if agent.is_active else "🟢 Включить"
     
-    # Обрезаем системный промпт, если он слишком длинный
-    prompt_text = agent.system_prompt
-    if len(prompt_text) > 250:
-        prompt_text = prompt_text[:250] + "..."
-    prompt = escape_md(prompt_text)
-
     text = (
-        f"🤖 *Карточка агента*\n\n"
+        f"🤖 *Управление агентом*\n\n"
         f"🔗 *Бот:* @{bot_name}\n"
-        f"📊 *Статус:* {status}\n"
-        f"📚 *Файлов в базе:* {docs_count}\n\n"
-        f"🧠 *Системная инструкция (промпт):*\n_{prompt}_"
+        f"📊 *Статус:* {status_text}\n"
+        f"📚 *Документов:* {docs_count}\n\n"
+        f"🧠 *Промпт:* \n_{escape_md(agent.system_prompt[:200])}..._"
     )
 
-    # Клавиатура управления конкретным агентом
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        # В будущем сюда можно добавить кнопки:
-        # [types.InlineKeyboardButton(text="📝 Изменить промпт", callback_data=f"edit_prompt_{agent.id}")],
-        # [types.InlineKeyboardButton(text="🗑 Удалить бота", callback_data=f"delete_agent_{agent.id}")],
-        [types.InlineKeyboardButton(text="⬅️ К списку агентов", callback_data="my_agents")],
-        [types.InlineKeyboardButton(text="🏠 Назад в меню", callback_data="start_menu")]
+        [
+            types.InlineKeyboardButton(text=toggle_label, callback_data=f"toggle_agent_{agent_id}"),
+            types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"confirm_delete_{agent_id}")
+        ],
+        [types.InlineKeyboardButton(text="⬅️ К списку агентов", callback_data="my_agents")]
     ])
 
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+
+# --- ПЕРЕКЛЮЧЕНИЕ СТАТУСА ---
+
+@master_router.callback_query(F.data.startswith("toggle_agent_"))
+async def toggle_agent(callback: types.CallbackQuery, session: AsyncSession):
+    agent_id = int(callback.data.split("_")[2])
+    agent = await session.get(Agent, agent_id)
+
+    if not agent:
+        return await callback.answer("Агент не найден.")
+
+    # Переключаем состояние
+    new_status = not agent.is_active
+    agent.is_active = new_status
+    await session.commit()
+
     try:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+        # Управляем вебхуком в зависимости от статуса
+        temp_bot = Bot(token=decrypt_token(agent.encrypted_token))
+        if new_status:
+            webhook_url = f"{os.getenv('BASE_URL')}/webhook/{agent.id}"
+            await temp_bot.set_webhook(url=webhook_url)
+        else:
+            await temp_bot.delete_webhook()
+        await temp_bot.session.close()
     except Exception as e:
-        # Резервный вариант вывода, если текст крашнет Markdown
-        await callback.message.edit_text(text.replace("*", "").replace("_", ""), reply_markup=kb)
+        print(f"Ошибка вебхука при переключении: {e}")
+
+    await callback.answer(f"Статус изменен: {'Включен' if new_status else 'Отключен'}")
+    await show_agent_info(callback, session) # Обновляем карточку
+
+# --- УДАЛЕНИЕ АГЕНТА ---
+
+@master_router.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_delete(callback: types.CallbackQuery):
+    agent_id = callback.data.split("_")[2]
+    
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="❌ ДА, УДАЛИТЬ", callback_data=f"delete_force_{agent_id}"),
+            types.InlineKeyboardButton(text="✅ ОТМЕНА", callback_data=f"agent_info_{agent_id}")
+        ]
+    ])
+    
+    await callback.message.edit_text(
+        "⚠️ *ВНИМАНИЕ!*\nВы уверены, что хотите удалить этого агента? Все данные и привязка бота будут стерты.",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+@master_router.callback_query(F.data.startswith("delete_force_"))
+async def delete_agent(callback: types.CallbackQuery, session: AsyncSession):
+    agent_id = int(callback.data.split("_")[2])
+    agent = await session.get(Agent, agent_id)
+
+    if agent:
+        try:
+            # 1. Отключаем вебхук перед удалением
+            temp_bot = Bot(token=decrypt_token(agent.encrypted_token))
+            await temp_bot.delete_webhook()
+            await temp_bot.session.close()
+        except:
+            pass
+
+        # 2. Удаляем из БД (каскадно удалятся и документы, если настроено в моделях)
+        await session.delete(agent)
+        await session.commit()
+        
+        # Здесь также можно добавить вызов функции удаления векторов из Qdrant по agent_id
+        
+        await callback.answer("Агент полностью удален.", show_alert=True)
+        await show_my_agents(callback, session) # Возвращаемся к списку
+    else:
+        await callback.answer("Агент уже был удален.")
+
+@master_router.callback_query(F.data.startswith("delete_force_"))
+async def delete_agent(callback: types.CallbackQuery, session: AsyncSession):
+    agent_id = int(callback.data.split("_")[2])
+    
+    # 1. Получаем агента из БД
+    agent = await session.get(Agent, agent_id)
+
+    if agent:
+        try:
+            # 2. Удаляем вебхук в Telegram
+            from core.crypto import decrypt_token
+            temp_bot = Bot(token=decrypt_token(agent.encrypted_token))
+            await temp_bot.delete_webhook()
+            await temp_bot.session.close()
+            
+            # 3. Очищаем Qdrant (вызываем новую функцию)
+            await delete_agent_vectors(agent_id)
+            
+            # 4. Удаляем из Postgres
+            # Благодаря cascade="all, delete-orphan", документы удалятся сами!
+            await session.delete(agent)
+            await session.commit()
+            
+            await callback.answer("Агент и все его данные успешно удалены.", show_alert=True)
+            # Возвращаемся к списку агентов (импортируйте функцию show_my_agents если нужно)
+            from handlers.master import show_my_agents
+            await show_my_agents(callback, session)
+            
+        except Exception as e:
+            await session.rollback()
+            print(f"Ошибка при удалении: {e}")
+            await callback.answer("Произошла ошибка при удалении.", show_alert=True)
+    else:
+        await callback.answer("Агент не найден.")

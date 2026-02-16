@@ -29,14 +29,18 @@ class Agent(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     
     owner: Mapped["User"] = relationship(back_populates="agents")
-    documents: Mapped[list["AgentDocument"]] = relationship(back_populates="agent")
+    
+    documents: Mapped[list["AgentDocument"]] = relationship(
+        back_populates="agent", 
+        cascade="all, delete-orphan"
+    )
 
 class AgentDocument(Base):
     """Метаданные файлов, на которых обучен конкретный агент."""
     __tablename__ = "agent_documents"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"))
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id", ondelete="CASCADE"))
     
     file_name: Mapped[str] = mapped_column(String(255))
     file_id: Mapped[str] = mapped_column(String(255))  # Telegram File ID
