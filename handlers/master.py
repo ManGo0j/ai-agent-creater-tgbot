@@ -207,10 +207,12 @@ async def show_my_agents(callback: types.CallbackQuery, session: AsyncSession):
     # Если агенты есть, собираем клавиатуру через Builder
     builder = InlineKeyboardBuilder()
     for agent in agents:
-        # Название кнопки: юзернейм или просто ID
+        
+        status_emoji = "🟢" if agent.is_active else "🔴"
         bot_name = f"@{agent.bot_username}" if agent.bot_username else f"Агент #{agent.id}"
-        # В callback_data зашиваем ID конкретного агента
-        builder.button(text=bot_name, callback_data=f"agent_info_{agent.id}")
+        button_text = f"{status_emoji} {bot_name}"
+        
+        builder.button(text=button_text, callback_data=f"agent_info_{agent.id}")
     
     # Делаем по 1 кнопке в ряд
     builder.adjust(1)
