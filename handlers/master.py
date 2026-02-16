@@ -104,21 +104,36 @@ async def process_token(message: types.Message, state: FSMContext, session: Asyn
         temp_bot = Bot(token=token)
         bot_info = await temp_bot.get_me()
         
+        # --- ПРОВЕРКА ПО УНИКАЛЬНОМУ ID БОТА ---
+        # Это защитит от смены username
+        existing_agent_res = await session.execute(
+            select(Agent).where(Agent.bot_id == bot_info.id)
+        )
+        existing_agent = existing_agent_res.scalar_one_or_none()
+
+        if existing_agent:
+            await temp_bot.session.close()
+            return await message.answer(
+                f"❌ Этот бот (ID: {bot_info.id}) уже зарегистрирован в системе под юзернеймом @{escape_md(existing_agent.bot_username)}.\n"
+                "Один и тот же бот не может быть добавлен дважды."
+            )
+        # ---------------------------------------
+
         user_res = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
         user = user_res.scalar()
         
         new_agent = Agent(
             owner_id=user.id,
+            bot_id=bot_info.id, # Сохраняем неизменный ID
             encrypted_token=encrypt_token(token),
-            bot_username=bot_info.username
+            bot_username=bot_info.username # Сохраняем для красоты в меню
         )
         session.add(new_agent)
         await session.commit()
 
-        # Добавляем drop_pending_updates=True, чтобы очистить очередь при создании/перепривязке
-        webhook_url = f"{os.getenv('BASE_URL')}/webhook/{new_agent.id}"
+        # Ставим вебхук с очисткой очереди
         await temp_bot.set_webhook(
-            url=webhook_url, 
+            url=f"{os.getenv('BASE_URL')}/webhook/{new_agent.id}",
             drop_pending_updates=True
         )
         await temp_bot.session.close()
@@ -128,7 +143,8 @@ async def process_token(message: types.Message, state: FSMContext, session: Asyn
         await state.set_state(CreateAgentSG.waiting_prompt)
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка токена: {e}")
+        if 'temp_bot' in locals(): await temp_bot.session.close()
+        await message.answer(f"❌ Ошибка: {e}")
 
 @master_router.message(CreateAgentSG.waiting_prompt)
 async def process_prompt(message: types.Message, state: FSMContext, session: AsyncSession):

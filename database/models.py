@@ -23,7 +23,8 @@ class Agent(Base):
     
     # Храним зашифрованный токен
     encrypted_token: Mapped[str] = mapped_column(String(500), unique=True)
-    bot_username: Mapped[str | None] = mapped_column(String(100))
+    bot_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=True) 
+    bot_username: Mapped[str] = mapped_column(String, nullable=True)
     
     system_prompt: Mapped[str] = mapped_column(Text, default="Ты — полезный ассистент.")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
