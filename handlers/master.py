@@ -115,8 +115,12 @@ async def process_token(message: types.Message, state: FSMContext, session: Asyn
         session.add(new_agent)
         await session.commit()
 
+        # Добавляем drop_pending_updates=True, чтобы очистить очередь при создании/перепривязке
         webhook_url = f"{os.getenv('BASE_URL')}/webhook/{new_agent.id}"
-        await temp_bot.set_webhook(url=webhook_url)
+        await temp_bot.set_webhook(
+            url=webhook_url, 
+            drop_pending_updates=True
+        )
         await temp_bot.session.close()
 
         await state.update_data(agent_id=new_agent.id)
@@ -253,25 +257,33 @@ async def toggle_agent(callback: types.CallbackQuery, session: AsyncSession):
     if not agent:
         return await callback.answer("Агент не найден.")
 
-    # Переключаем состояние
+    # Переключаем состояние в БД
     new_status = not agent.is_active
     agent.is_active = new_status
     await session.commit()
 
     try:
-        # Управляем вебхуком в зависимости от статуса
+        from core.crypto import decrypt_token
         temp_bot = Bot(token=decrypt_token(agent.encrypted_token))
+        
         if new_status:
+            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+            # Добавляем drop_pending_updates=True, чтобы удалить старые сообщения
             webhook_url = f"{os.getenv('BASE_URL')}/webhook/{agent.id}"
-            await temp_bot.set_webhook(url=webhook_url)
+            await temp_bot.set_webhook(
+                url=webhook_url, 
+                drop_pending_updates=True  # Игнорировать всё, что прислали, пока бот был выключен
+            )
         else:
+            # При отключении просто удаляем вебхук
             await temp_bot.delete_webhook()
+            
         await temp_bot.session.close()
     except Exception as e:
         print(f"Ошибка вебхука при переключении: {e}")
 
     await callback.answer(f"Статус изменен: {'Включен' if new_status else 'Отключен'}")
-    await show_agent_info(callback, session) # Обновляем карточку
+    await show_agent_info(callback, session)
 
 # --- УДАЛЕНИЕ АГЕНТА ---
 
