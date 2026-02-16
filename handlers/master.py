@@ -14,6 +14,7 @@ from keyboards.master_kb import get_main_menu
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from core.crypto import decrypt_token  
 from services.search_service import delete_agent_vectors
+from services.search_service import delete_document_vectors
 
 master_router = Router()
 
@@ -256,14 +257,13 @@ async def show_agent_info(callback: types.CallbackQuery, session: AsyncSession):
     )
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-            [
-                types.InlineKeyboardButton(text="📝 Изменить промпт", callback_data=f"edit_prompt_{agent_id}")
-            ],
-            [
-                types.InlineKeyboardButton(text=toggle_label, callback_data=f"toggle_agent_{agent_id}"),
-                types.InlineKeyboardButton(text="🗑 Удалить", callback_data=f"confirm_delete_{agent_id}")
-            ],
-            [types.InlineKeyboardButton(text="⬅️ К списку агентов", callback_data="my_agents")]
+        [types.InlineKeyboardButton(text="📝 Изменить промпт", callback_data=f"edit_prompt_{agent_id}")],
+        [types.InlineKeyboardButton(text="📚 Редактировать базу знаний", callback_data=f"edit_kb_{agent_id}")],
+        [
+            types.InlineKeyboardButton(text=toggle_label, callback_data=f"toggle_agent_{agent_id}"),
+            types.InlineKeyboardButton(text="🗑 Удалить бота", callback_data=f"confirm_delete_{agent_id}")
+        ],
+        [types.InlineKeyboardButton(text="⬅️ К списку агентов", callback_data="my_agents")]
     ])
 
     await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
@@ -432,3 +432,102 @@ async def process_new_prompt(message: types.Message, state: FSMContext, session:
     
     await message.answer("✅ Системный промпт успешно обновлен!")
     await show_agent_info(fake_callback, session)
+
+# --- УПРАВЛЕНИЕ БАЗОЙ ЗНАНИЙ (ДОКУМЕНТЫ) ---
+
+@master_router.callback_query(F.data.startswith("edit_kb_"))
+async def show_knowledge_base(callback: types.CallbackQuery, session: AsyncSession):
+    agent_id = int(callback.data.split("_")[2])
+
+    # Получаем все документы агента
+    docs_res = await session.execute(
+        select(AgentDocument).where(AgentDocument.agent_id == agent_id).order_by(AgentDocument.created_at.desc())
+    )
+    docs = docs_res.scalars().all()
+
+    builder = InlineKeyboardBuilder()
+
+    if docs:
+        for doc in docs:
+            # Обрезаем имя файла, если оно слишком длинное (Telegram лимит на кнопки)
+            short_name = doc.file_name[:25] + "..." if len(doc.file_name) > 25 else doc.file_name
+            # Индикаторы статуса
+            status_emoji = "⏳" if doc.status == "processing" else "✅" if doc.status == "ready" else "❌"
+            
+            builder.button(
+                text=f"🗑 {status_emoji} {short_name}",
+                callback_data=f"del_doc_conf_{doc.id}"
+            )
+        builder.adjust(1) # По одной кнопке в ряд
+    
+    # Кнопки навигации
+    # builder.row(types.InlineKeyboardButton(text="➕ Добавить файл", callback_data=f"add_doc_{agent_id}")) # Задел на будущее
+    builder.row(types.InlineKeyboardButton(text="⬅️ Назад к агенту", callback_data=f"agent_info_{agent_id}"))
+
+    text = (
+        "📚 *Управление базой знаний*\n\n"
+        "Нажмите на файл, который хотите удалить.\n\n"
+        "Легенда:\n"
+        "✅ — Успешно загружен в ИИ\n"
+        "⏳ — В процессе обработки\n"
+        "❌ — Ошибка чтения файла"
+    ) if docs else "📚 *Управление базой знаний*\n\nВ базе данных этого агента пока нет файлов."
+
+    await callback.message.edit_text(text, reply_markup=builder.as_markup(), parse_mode="Markdown")
+
+
+# --- ПОДТВЕРЖДЕНИЕ УДАЛЕНИЯ ДОКУМЕНТА ---
+
+@master_router.callback_query(F.data.startswith("del_doc_conf_"))
+async def confirm_delete_document(callback: types.CallbackQuery, session: AsyncSession):
+    # callback_data имеет вид "del_doc_conf_15", id под индексом 3
+    doc_id = int(callback.data.split("_")[3])
+
+    doc = await session.get(AgentDocument, doc_id)
+    if not doc:
+        return await callback.answer("Ошибка: документ не найден.", show_alert=True)
+
+    text = f"⚠️ *ВНИМАНИЕ!*\n\nВы действительно хотите навсегда удалить файл `{escape_md(doc.file_name)}`?\nБот больше не сможет использовать его для ответов."
+
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [
+            types.InlineKeyboardButton(text="✅ ОТМЕНА", callback_data=f"edit_kb_{doc.agent_id}"),
+            types.InlineKeyboardButton(text="❌ ДА, УДАЛИТЬ", callback_data=f"del_doc_force_{doc.id}")
+        ]
+    ])
+
+    await callback.message.edit_text(text, reply_markup=kb, parse_mode="Markdown")
+
+
+# --- ФАКТИЧЕСКОЕ УДАЛЕНИЕ ДОКУМЕНТА ---
+
+@master_router.callback_query(F.data.startswith("del_doc_force_"))
+async def force_delete_document(callback: types.CallbackQuery, session: AsyncSession):
+    doc_id = int(callback.data.split("_")[3])
+
+    doc = await session.get(AgentDocument, doc_id)
+    if not doc:
+        return await callback.answer("Документ уже был удален.")
+
+    agent_id = doc.agent_id
+
+    try:
+        # 1. Удаляем векторы из векторной БД Qdrant
+        await delete_document_vectors(doc_id)
+
+        # 2. Удаляем запись из Postgres
+        await session.delete(doc)
+        await session.commit()
+
+        await callback.answer("✅ Файл успешно удален из базы знаний!", show_alert=True)
+    except Exception as e:
+        await session.rollback()
+        print(f"Ошибка при удалении документа: {e}")
+        await callback.answer("Произошла ошибка при удалении.", show_alert=True)
+
+    # Возвращаемся обратно в меню базы знаний (генерируем фейковый callback)
+    fake_callback = types.CallbackQuery(
+        id="0", from_user=callback.from_user, chat_instance="0",
+        message=callback.message, data=f"edit_kb_{agent_id}"
+    )
+    await show_knowledge_base(fake_callback, session)
