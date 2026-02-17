@@ -16,6 +16,7 @@ from core.crypto import decrypt_token
 from services.search_service import delete_agent_vectors
 from services.search_service import delete_document_vectors
 from services.ai_service import generate_welcome_with_ai
+from services.ai_service import improve_prompt_with_ai
 
 master_router = Router()
 
@@ -396,17 +397,73 @@ async def delete_agent(callback: types.CallbackQuery, session: AsyncSession):
 @master_router.callback_query(F.data.startswith("edit_prompt_"))
 async def start_edit_prompt(callback: types.CallbackQuery, state: FSMContext):
     agent_id = int(callback.data.split("_")[2])
-    
     await state.update_data(edit_agent_id=agent_id)
     await state.set_state(CreateAgentSG.editing_prompt)
     
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✨ Улучшить текущий через ИИ", callback_data=f"ai_improve_prompt_{agent_id}")]
+    ])
+    
     await callback.message.answer(
-        "📝 *Режим редактирования промпта*\n\n"
-        "Пришли мне новый системный промпт для этого бота.\n"
-        "Чтобы отменить, нажми /start",
+        "📝 *Редактирование системного промпта*\n\n"
+        "Введите новую инструкцию для бота. Опишите, как он должен себя вести и на какие вопросы отвечать.\n\n"
+        "💡 *Совет:* Чем подробнее инструкция, тем лучше результат.",
+        reply_markup=kb,
         parse_mode="Markdown"
     )
     await callback.answer()
+
+@master_router.callback_query(F.data.startswith("ai_improve_prompt_"))
+async def process_ai_improve_prompt(callback: types.CallbackQuery, state: FSMContext, session: AsyncSession):
+    agent_id = int(callback.data.split("_")[3])
+    
+    # 1. Получаем текущий промпт агента
+    result = await session.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    
+    if not agent or not agent.system_prompt:
+        await callback.answer("❌ Сначала введите хотя бы краткое описание роли!", show_alert=True)
+        return
+
+    # Визуальный фидбек пользователю
+    await callback.message.edit_text(
+        "*LLM модель обрабатывает промпт...*", 
+        parse_mode="Markdown"
+    )
+    
+    # 2. Генерируем улучшение через сервис
+    # Убедись, что improve_prompt_with_ai импортирована из services.ai_service
+    new_prompt = await improve_prompt_with_ai(agent.system_prompt)
+    
+    # 3. Сохраняем новый промпт в базу данных
+    await session.execute(
+        update(Agent).where(Agent.id == agent_id).values(system_prompt=new_prompt)
+    )
+    await session.commit()
+    
+    # Сбрасываем состояние FSM, так как редактирование завершено
+    await state.clear()
+    
+    # Экранируем текст для безопасного отображения в Markdown
+    # Это предотвратит ошибку "can't parse entities", если ИИ выдаст много спецсимволов
+    safe_new_prompt = escape_md(new_prompt)
+    
+    # 4. Отправляем красивое сообщение с результатом (как при приветствии)
+    await callback.message.answer(
+        f"✅ ИИ модель придумала отличный промпт :\n\n_{safe_new_prompt}_",
+        parse_mode="Markdown"
+    )
+    
+    # 5. Возвращаем пользователя к карточке управления агентом
+    from handlers.master import show_agent_info
+    fake_callback = types.CallbackQuery(
+        id="0", 
+        from_user=callback.from_user, 
+        chat_instance="0",
+        message=callback.message, 
+        data=f"agent_info_{agent_id}"
+    )
+    await show_agent_info(fake_callback, session)
 
 @master_router.message(CreateAgentSG.editing_prompt)
 async def process_new_prompt(message: types.Message, state: FSMContext, session: AsyncSession):
@@ -671,7 +728,7 @@ async def generate_welcome_callback(callback: types.CallbackQuery, state: FSMCon
     
     # 5. Отправляем результат
     await callback.message.answer(
-        f"✅ *DeepSeek придумал отличное приветствие:*\n\n_{generated_text}_", 
+        f"✅ *ИИ модель придумала отличное приветствие:*\n\n_{generated_text}_", 
         parse_mode="Markdown"
     )
     

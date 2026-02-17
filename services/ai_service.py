@@ -97,3 +97,28 @@ async def generate_welcome_with_ai(system_prompt: str) -> str:
     except Exception as e:
         print(f"❌ Ошибка при генерации приветствия: {e}")
         return "Произошла ошибка при генерации приветствия. Пожалуйста, попробуйте задать его вручную."
+    
+async def improve_prompt_with_ai(current_prompt: str) -> str:
+    """Превращает короткое описание в структурированный системный промпт."""
+    instruction = (
+        "Ты — эксперт по разработке системных промптов для больших языковых моделей. "
+        "Твоя задача: взять сырое описание роли бота и превратить его в четкую, структурированную инструкцию.\n\n"
+        "Используй следующую структуру:\n"
+        "1. Роль и контекст.\n"
+        "2. Основные задачи.\n"
+        "3. Стиль общения и ограничения.\n"
+        "4. Правило: всегда использовать предоставленные документы из базы знаний.\n\n"
+        f"Текущее описание/промпт: {current_prompt}\n\n"
+        "Напиши только текст итогового промпта, без лишних вступлений."
+    )
+    
+    try:
+        response = await ai_client.chat.completions.create(
+            model="deepseek-chat", 
+            messages=[{"role": "user", "content": instruction}],
+            temperature=1.0 # Чуть больше креативности для промпта
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"❌ Ошибка улучшения промпта: {e}")
+        return current_prompt # Возвращаем оригинал, если упал
