@@ -74,3 +74,26 @@ async def get_answer(question: str, context_list: list, system_prompt: str) -> s
         
     except Exception as e:
         return f"Ошибка при генерации ответа: {str(e)}"
+    
+async def generate_welcome_with_ai(system_prompt: str) -> str:
+    """Генерирует приветствие на основе системного промпта агента."""
+    prompt = (
+        "Ты профессиональный копирайтер. Напиши короткое, дружелюбное и вовлекающее приветственное "
+        "сообщение (максимум 2-3 предложения) для Telegram-бота от первого лица. "
+        "Пользователь увидит это сообщение после нажатия кнопки /start.\n\n"
+        "Обязательно опирайся на системный промпт бота, чтобы передать его характер и суть работы.\n"
+        "Пиши ТОЛЬКО текст приветствия, без кавычек и лишних пояснений.\n\n"
+        f"Системный промпт бота:\n{system_prompt}"
+    )
+    
+    try:
+        response = await ai_client.chat.completions.create(
+            model="deepseek-chat", 
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=150,
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"❌ Ошибка при генерации приветствия: {e}")
+        return "Произошла ошибка при генерации приветствия. Пожалуйста, попробуйте задать его вручную."

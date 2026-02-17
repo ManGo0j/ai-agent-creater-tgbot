@@ -15,6 +15,7 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from core.crypto import decrypt_token  
 from services.search_service import delete_agent_vectors
 from services.search_service import delete_document_vectors
+from services.ai_service import generate_welcome_with_ai
 
 master_router = Router()
 
@@ -623,7 +624,10 @@ async def start_edit_welcome(callback: types.CallbackQuery, state: FSMContext):
     agent_id = int(callback.data.split("_")[2])
     await state.update_data(edit_agent_id=agent_id)
     await state.set_state(CreateAgentSG.editing_welcome)
-    await callback.message.answer("Введите новое приветственное сообщение, которое пользователь увидит при команде /start:")
+    kb = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(text="✨ Сгенерировать с ИИ", callback_data=f"gen_welcome_{agent_id}")]
+    ])
+    await callback.message.answer("Введите новое приветственное сообщение или сгенерируйте его с помощью ИИ, которое пользователь увидит при команде /start:", reply_markup=kb)
     await callback.answer()
 
 @master_router.message(CreateAgentSG.editing_welcome)
@@ -637,3 +641,44 @@ async def process_welcome_message(message: types.Message, state: FSMContext, ses
     await session.commit()
     await state.clear()
     await message.answer("✅ Приветствие сохранено!")
+
+@master_router.callback_query(F.data.startswith("gen_welcome_"))
+async def generate_welcome_callback(callback: types.CallbackQuery, state: FSMContext, session: AsyncSession):
+    agent_id = int(callback.data.split("_")[2])
+    
+    # Меняем сообщение, чтобы пользователь видел процесс
+    await callback.message.edit_text("⏳ *DeepSeek анализирует промпт и генерирует приветствие...*", parse_mode="Markdown")
+    
+    # 1. Достаем агента из БД, чтобы получить его system_prompt
+    result = await session.execute(select(Agent).where(Agent.id == agent_id))
+    agent = result.scalar_one_or_none()
+    
+    if not agent:
+        await callback.answer("Агент не найден", show_alert=True)
+        return
+        
+    # 2. Генерируем текст через ИИ
+    generated_text = await generate_welcome_with_ai(agent.system_prompt)
+    
+    # 3. Сохраняем в БД
+    await session.execute(
+        update(Agent).where(Agent.id == agent_id).values(welcome_message=generated_text)
+    )
+    await session.commit()
+    
+    # 4. Очищаем состояние (пользователю больше не нужно вводить текст вручную)
+    await state.clear()
+    
+    # 5. Отправляем результат
+    await callback.message.answer(
+        f"✅ *DeepSeek придумал отличное приветствие:*\n\n_{generated_text}_", 
+        parse_mode="Markdown"
+    )
+    
+    # 6. Возвращаем пользователя в меню карточки агента
+    from handlers.master import show_agent_info
+    fake_callback = types.CallbackQuery(
+        id="0", from_user=callback.from_user, chat_instance="0",
+        message=callback.message, data=f"agent_info_{agent_id}"
+    )
+    await show_agent_info(fake_callback, session)
