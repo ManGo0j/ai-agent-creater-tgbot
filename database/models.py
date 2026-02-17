@@ -28,6 +28,7 @@ class Agent(Base):
     
     system_prompt: Mapped[str] = mapped_column(Text, default="Ты — полезный ассистент.")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    welcome_message = mapped_column(Text, nullable=True)
     
     owner: Mapped["User"] = relationship(back_populates="agents")
     

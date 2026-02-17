@@ -44,7 +44,8 @@ class AgentContextMiddleware(BaseMiddleware):
                     data["agent_config"] = {
                         "id": agent.id,
                         "system_prompt": agent.system_prompt,
-                        "is_active": agent.is_active
+                        "is_active": agent.is_active,
+                        "welcome_message": agent.welcome_message
                     }
         
         return await handler(event, data)

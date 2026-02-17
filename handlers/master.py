@@ -257,7 +257,10 @@ async def show_agent_info(callback: types.CallbackQuery, session: AsyncSession):
     )
 
     kb = types.InlineKeyboardMarkup(inline_keyboard=[
-        [types.InlineKeyboardButton(text="📝 Изменить промпт", callback_data=f"edit_prompt_{agent_id}")],
+       [
+        types.InlineKeyboardButton(text="📝 Изменить промпт", callback_data=f"edit_prompt_{agent_id}"),
+        types.InlineKeyboardButton(text="👋 Изменить приветствие", callback_data=f"edit_welcome_{agent_id}")
+        ],
         [types.InlineKeyboardButton(text="📚 Редактировать базу знаний", callback_data=f"edit_kb_{agent_id}")],
         [
             types.InlineKeyboardButton(text=toggle_label, callback_data=f"toggle_agent_{agent_id}"),
@@ -612,3 +615,23 @@ async def process_extra_document(message: types.Message, state: FSMContext, sess
     # Импортируем функцию здесь, чтобы избежать кругового импорта
     from handlers.master import show_knowledge_base
     await show_knowledge_base(fake_callback, session)
+
+@master_router.callback_query(F.data.startswith("edit_welcome_"))
+async def start_edit_welcome(callback: types.CallbackQuery, state: FSMContext):
+    agent_id = int(callback.data.split("_")[2])
+    await state.update_data(edit_agent_id=agent_id)
+    await state.set_state(CreateAgentSG.editing_welcome)
+    await callback.message.answer("Введите новое приветственное сообщение, которое пользователь увидит при команде /start:")
+    await callback.answer()
+
+@master_router.message(CreateAgentSG.editing_welcome)
+async def process_welcome_message(message: types.Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    agent_id = data.get('edit_agent_id')
+    
+    await session.execute(
+        update(Agent).where(Agent.id == agent_id).values(welcome_message=message.text)
+    )
+    await session.commit()
+    await state.clear()
+    await message.answer("✅ Приветствие сохранено!")

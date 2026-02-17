@@ -1,5 +1,6 @@
 import os
 from dotenv import load_dotenv
+from qdrant_client import AsyncQdrantClient
 
 load_dotenv()
 
@@ -13,3 +14,8 @@ class Settings:
     MASTER_BOT_TOKEN = os.getenv("MASTER_BOT_TOKEN")
 
 settings = Settings()
+
+q_client = AsyncQdrantClient(
+    url=settings.QDRANT_URL, 
+    api_key=settings.QDRANT_API_KEY
+)
