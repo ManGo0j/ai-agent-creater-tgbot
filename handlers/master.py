@@ -238,7 +238,7 @@ async def show_agent_info(callback: types.CallbackQuery, session: AsyncSession):
     if not agent:
         await callback.answer("Агент не найден.", show_alert=True)
         return
-
+    welcome_display = agent.welcome_message if agent.welcome_message else "❌ Не установлено"
     docs_res = await session.execute(
         select(func.count(AgentDocument.id)).where(AgentDocument.agent_id == agent_id)
     )
@@ -250,9 +250,11 @@ async def show_agent_info(callback: types.CallbackQuery, session: AsyncSession):
     
     text = (
         f"🤖 *Управление агентом*\n\n"
+        f"ID: `{agent.id}`\n"
         f"🔗 *Бот:* @{bot_name}\n"
         f"📊 *Статус:* {status_text}\n"
-        f"📚 *Документов:* {docs_count}\n\n"
+        f"📚 *Документов:* {docs_count}\n"
+        f"👋 *Приветствие:* {welcome_display}\n\n"
         f"🧠 *Промпт:* \n_{escape_md(agent.system_prompt[:200])}..._"
     )
 
