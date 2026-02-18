@@ -7,6 +7,8 @@ class User(Base):
     """Владелец платформы (тот, кто создает ботов)."""
     __tablename__ = "users"
 
+    subscription_type: Mapped[str] = mapped_column(String(50), default="Free")
+    subscription_end_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     id: Mapped[int] = mapped_column(primary_key=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[str | None] = mapped_column(String(100))
@@ -27,7 +29,7 @@ class Agent(Base):
     bot_username: Mapped[str] = mapped_column(String, nullable=True)
     
     system_prompt: Mapped[str] = mapped_column(Text, default="Ты — полезный ассистент.")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     welcome_message = mapped_column(Text, nullable=True)
     
     owner: Mapped["User"] = relationship(back_populates="agents")
