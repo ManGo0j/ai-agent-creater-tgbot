@@ -19,7 +19,7 @@ from services.ai_service import generate_welcome_with_ai
 from services.ai_service import improve_prompt_with_ai
 
 from datetime import datetime, timedelta
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from database.models import User
 from keyboards.master_kb import get_main_menu, get_tariffs_keyboard
 
@@ -108,9 +108,58 @@ async def show_profile(callback: types.CallbackQuery, session: AsyncSession):
 # --- СОЗДАНИЕ АГЕНТА ---
 
 @master_router.callback_query(F.data == "add_agent")
-async def start_add_agent(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Отправь API токен нового бота из @BotFather:")
+async def start_add_agent(callback: types.CallbackQuery, state: FSMContext, session: AsyncSession):
+    # 1. Получаем данные пользователя и его текущий тариф
+    res = await session.execute(select(User).where(User.telegram_id == callback.from_user.id))
+    user = res.scalar_one_or_none()
+    
+    if not user:
+        await callback.answer("Ошибка: пользователь не найден в базе.", show_alert=True)
+        return
+
+    # 2. Считаем, сколько агентов уже создал этот пользователь
+    count_res = await session.execute(
+        select(func.count(Agent.id)).where(Agent.owner_id == user.id)
+    )
+    agents_count = count_res.scalar() or 0
+
+    # 3. Определяем лимиты согласно ТЗ
+    # Базовый (Free) — 1, Продвинутый — 5, Pro — 20
+    limits = {
+        "Free": 1,
+        "Advanced": 5,
+        "Pro": 20
+    }
+    
+    current_limit = limits.get(user.subscription_type, 1)
+
+    # 4. Проверяем превышение лимита
+    if agents_count >= current_limit:
+        kb = types.InlineKeyboardMarkup(inline_keyboard=[
+            [types.InlineKeyboardButton(text="💎 Повысить тариф", callback_data="tariffs_menu")],
+            [types.InlineKeyboardButton(text="⬅️ В меню", callback_data="back_to_start")]
+        ])
+        
+        await callback.message.edit_text(
+            f"🚫 *Лимит достигнут*\n\n"
+            f"На вашем тарифе (*{user.subscription_type}*) можно создать не более {current_limit} агентов.\n"
+            f"У вас уже создано: {agents_count}.\n\n"
+            f"Чтобы создавать больше ботов, пожалуйста, обновите тарифную подписку.",
+            reply_markup=kb,
+            parse_mode="Markdown"
+        )
+        await callback.answer()
+        return
+
+    # 5. Если лимит не превышен, запускаем стандартный процесс создания
     await state.set_state(CreateAgentSG.waiting_token)
+    await callback.message.answer(
+        "🤖 *Создание нового агента*\n\n"
+        "Для начала работы мне нужен API токен вашего бота.\n"
+        "Получить его можно у @BotFather.",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
 
 @master_router.message(CreateAgentSG.waiting_token)
 async def process_token(message: types.Message, state: FSMContext, session: AsyncSession):
