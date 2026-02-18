@@ -226,20 +226,58 @@ async def handle_docs(message: types.Message, state: FSMContext, session: AsyncS
     file_id = message.document.file_id
     file_name = message.document.file_name
     
-    new_doc = AgentDocument(agent_id=agent_id, file_name=file_name, file_id=file_id, status="processing")
-    session.add(new_doc)
-    await session.commit()
-    
+    # 1. Сначала скачиваем файл во временную папку для анализа
     os.makedirs("temp_uploads", exist_ok=True)
     file_path = f"temp_uploads/{file_id}_{file_name}"
     await bot.download(message.document, destination=file_path)
-    asyncio.create_task(process_document(file_path, agent_id, new_doc.id))
-    await message.answer(f"⏳ Файл '{escape_md(file_name)}' принят.")
 
-@master_router.message(CreateAgentSG.waiting_docs, CommandStart())
-async def finish_setup(message: types.Message, state: FSMContext, session: AsyncSession):
-    await state.clear()
-    await cmd_start(message, session)
+    # 2. Предварительная проверка лимитов (Этап 4)
+    from services.indexer import extract_text, text_splitter, get_current_chunks_count, CHUNK_LIMITS
+    
+    # Получаем тариф пользователя
+    result = await session.execute(select(User).join(Agent).where(Agent.id == agent_id))
+    user = result.scalar_one_or_none()
+    limit = CHUNK_LIMITS.get(user.subscription_type, 100)
+
+    # Извлекаем текст и считаем чанки
+    text = await extract_text(file_path)
+    chunks = text_splitter.split_text(text)
+    new_chunks_count = len(chunks)
+    
+    current_count = await get_current_chunks_count(agent_id)
+
+    if current_count + new_chunks_count > limit:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        
+        await message.answer(
+            f"🚫 *Лимит превышен!*\n\n"
+            f"Ваш тариф: *{user.subscription_type}* (лимит {limit} чанков).\n"
+            f"Уже использовано: {current_count}.\n"
+            f"Этот файл добавит еще {new_chunks_count} чанков.\n\n"
+            f"Пожалуйста, удалите старые файлы или повысьте тариф в меню.",
+            reply_markup=get_tariffs_keyboard(),
+            parse_mode="Markdown"
+        )
+        return
+
+    # 3. Если лимит не превышен — создаем запись в БД и запускаем обработку
+    new_doc = AgentDocument(
+        agent_id=agent_id, 
+        file_name=file_name, 
+        file_id=file_id, 
+        status="processing"
+    )
+    session.add(new_doc)
+    await session.commit()
+    
+    # Запускаем фоновую индексацию (теперь она точно пройдет по лимитам)
+    asyncio.create_task(process_document(file_path, agent_id, new_doc.id))
+    
+    await message.answer(
+        f"✅ Файл '_{escape_md(file_name)}_' принят и обрабатывается ({new_chunks_count} чанков).",
+        parse_mode="Markdown"
+    )
 
 # --- МОИ АГЕНТЫ (СПИСОК) ---
 
@@ -695,10 +733,52 @@ async def process_extra_document(message: types.Message, state: FSMContext, sess
     file_name = message.document.file_name
     file_id = message.document.file_id
 
-    msg = await message.answer(f"⏳ Начинаю загрузку и обработку файла `{file_name}`...")
+    # Временное сообщение
+    msg = await message.answer(f"⏳ Проверяю лимиты и анализирую файл `{file_name}`...")
 
     try:
-        # 1. Добавляем запись в БД Postgres
+        # 1. Скачиваем файл для предварительного анализа чанков
+        os.makedirs("temp_uploads", exist_ok=True)
+        file_path = f"temp_uploads/{file_id}_{file_name}"
+        await bot.download(message.document, destination=file_path)
+
+        # 2. Импортируем инструменты лимитов из индексера
+        from services.indexer import extract_text, text_splitter, get_current_chunks_count, CHUNK_LIMITS, process_document
+        
+        # 3. Получаем тариф пользователя (через владельца агента)
+        from database.models import User, Agent
+        result = await session.execute(
+            select(User).join(Agent).where(Agent.id == agent_id)
+        )
+        user = result.scalar_one_or_none()
+        
+        current_plan = user.subscription_type if user else "Free"
+        limit = CHUNK_LIMITS.get(current_plan, 100)
+
+        # 4. Считаем чанки в новом файле
+        text = await extract_text(file_path)
+        chunks = text_splitter.split_text(text)
+        new_chunks_count = len(chunks)
+        
+        # Считаем текущее кол-во чанков в Qdrant
+        current_count = await get_current_chunks_count(agent_id)
+
+        # 5. ПРОВЕРКА: Проходит ли файл в лимит?
+        if current_count + new_chunks_count > limit:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            
+            await msg.edit_text(
+                f"🚫 *Лимит базы знаний превышен!*\n\n"
+                f"Ваш тариф: *{current_plan}* (макс. {limit} чанков).\n"
+                f"Уже использовано: {current_count}.\n"
+                f"Файл содержит: {new_chunks_count}.\n\n"
+                f"Удалите старые документы или повысьте тариф в меню.",
+                parse_mode="Markdown"
+            )
+            return
+
+        # 6. Если всё хорошо — фиксируем в Postgres и запускаем фон
         new_doc = AgentDocument(
             agent_id=agent_id, 
             file_name=file_name, 
@@ -706,37 +786,25 @@ async def process_extra_document(message: types.Message, state: FSMContext, sess
             status="processing"
         )
         session.add(new_doc)
-        await session.commit() # Фиксируем, чтобы получить ID
+        await session.commit()
 
-        # 2. Скачиваем файл во временную папку
-        os.makedirs("temp_uploads", exist_ok=True)
-        file_path = f"temp_uploads/{file_id}_{file_name}"
-        await bot.download(message.document, destination=file_path)
-
-        # 3. ВАЖНО: Используем правильную функцию из вашего indexer.py
-        from services.indexer import process_document
-        
-        # Запускаем фоновую задачу (чтобы не вешать бота на время обработки)
         asyncio.create_task(process_document(file_path, agent_id, new_doc.id))
-
-        await msg.edit_text(f"✅ Файл `{file_name}` успешно принят и обрабатывается!")
+        await msg.edit_text(f"✅ Файл `{file_name}` принят и обрабатывается ({new_chunks_count} чанков).")
 
     except Exception as e:
         print(f"❌ Ошибка в process_extra_document: {e}")
         await msg.edit_text(f"❌ Ошибка при обработке файла: {e}")
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)
 
-    # Возврат в меню базы знаний
-    fake_callback = types.CallbackQuery(
-        id="0", 
-        from_user=message.from_user, 
-        chat_instance="0",
-        message=message, 
-        data=f"edit_kb_{agent_id}"
-    )
-    # Импортируем функцию здесь, чтобы избежать кругового импорта
+    # 7. Возврат в меню базы знаний (через небольшую паузу, чтобы успели прочитать)
+    await asyncio.sleep(2)
     from handlers.master import show_knowledge_base
+    fake_callback = types.CallbackQuery(
+        id="0", from_user=message.from_user, chat_instance="0",
+        message=message, data=f"edit_kb_{agent_id}"
+    )
     await show_knowledge_base(fake_callback, session)
-
 @master_router.callback_query(F.data.startswith("edit_welcome_"))
 async def start_edit_welcome(callback: types.CallbackQuery, state: FSMContext):
     agent_id = int(callback.data.split("_")[2])
