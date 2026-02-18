@@ -18,6 +18,11 @@ from services.search_service import delete_document_vectors
 from services.ai_service import generate_welcome_with_ai
 from services.ai_service import improve_prompt_with_ai
 
+from datetime import datetime, timedelta
+from sqlalchemy import select, update
+from database.models import User
+from keyboards.master_kb import get_main_menu, get_tariffs_keyboard
+
 master_router = Router()
 
 # --- Вспомогательная функция для безопасности Markdown ---
@@ -31,15 +36,22 @@ def escape_md(text: str) -> str:
 
 @master_router.message(CommandStart())
 async def cmd_start(message: types.Message, session: AsyncSession):
+    # Логика регистрации пользователя
     res = await session.execute(select(User).where(User.telegram_id == message.from_user.id))
     user = res.scalar_one_or_none()
+    
     if not user:
-        user = User(telegram_id=message.from_user.id, username=message.from_user.username)
+        user = User(
+            telegram_id=message.from_user.id, 
+            username=message.from_user.username,
+            subscription_type="Free" # Явно задаем базовый тариф при регистрации
+        )
         session.add(user)
         await session.commit()
     
     await message.answer(
-        f"Привет, {message.from_user.first_name}! Это конструктор AI-агентов.", 
+        f"Привет, {message.from_user.first_name}! Это конструктор AI-агентов.\n\n"
+        "Здесь ты можешь создать своего бота с кастомными промптами и базой знаний.",
         reply_markup=get_main_menu()
     )
 
@@ -739,3 +751,74 @@ async def generate_welcome_callback(callback: types.CallbackQuery, state: FSMCon
         message=callback.message, data=f"agent_info_{agent_id}"
     )
     await show_agent_info(fake_callback, session)
+
+@master_router.callback_query(F.data == "tariffs_menu")
+async def show_tariffs(callback: types.CallbackQuery, session: AsyncSession):
+    """Отображение меню тарифов и текущего статуса пользователя."""
+    # Получаем данные пользователя из БД
+    result = await session.execute(
+        select(User).where(User.telegram_id == callback.from_user.id)
+    )
+    user = result.scalar_one_or_none()
+    
+    # Если пользователя вдруг нет, или у него нет тарифа, ставим Free
+    current_plan = user.subscription_type if user and user.subscription_type else "Free"
+
+    text = (
+        f"💎 *Управление подпиской*\n\n"
+        f"Ваш текущий тариф: *{current_plan}*\n\n"
+        f"🚀 *Доступные планы:*\n\n"
+        f"1️⃣ *Базовый (Free)*\n"
+        f"— 1 активный агент\n"
+        f"— Лимит базы знаний: 100 чанков\n"
+        f"— Цена: 0₽/мес\n\n"
+        f"2️⃣ *Продвинутый*\n"
+        f"— До 5 активных агентов\n"
+        f"— Лимит базы знаний: 500 чанков\n"
+        f"— Цена: 1 990₽/мес\n\n"
+        f"3️⃣ *Pro*\n"
+        f"— До 20 активных агентов\n"
+        f"— Лимит базы знаний: Безлимит\n"
+        f"— Цена: 9 990₽/мес\n"
+    )
+
+    await callback.message.edit_text(
+        text, 
+        reply_markup=get_tariffs_keyboard(), 
+        parse_mode="Markdown"
+    )
+
+
+@master_router.callback_query(F.data == "back_to_start")
+async def back_to_start(callback: types.CallbackQuery):
+    """Возврат в главное меню из тарифов."""
+    await callback.message.edit_text(
+        "👋 Привет! Я Мастер-бот для создания AI-агентов.\n\n"
+        "Здесь ты можешь создать своего бота с кастомными промптами и базой знаний.",
+        reply_markup=get_main_menu()
+    )
+
+
+@master_router.callback_query(F.data.startswith("set_plan_"))
+async def process_set_plan(callback: types.CallbackQuery, session: AsyncSession):
+    """Имитация оплаты: переключение тарифа в БД."""
+    plan_name = callback.data.split("_")[2] # Достаем название плана (Advanced или Pro)
+    
+    # Имитируем оплату: ставим тариф на 30 дней вперед
+    end_date = datetime.utcnow() + timedelta(days=30)
+    
+    # Обновляем запись пользователя в базе
+    await session.execute(
+        update(User)
+        .where(User.telegram_id == callback.from_user.id)
+        .values(
+            subscription_type=plan_name,
+            subscription_end_date=end_date
+        )
+    )
+    await session.commit()
+    
+    await callback.answer(f"✅ Тариф {plan_name} успешно активирован на 30 дней!", show_alert=True)
+    
+    # Сразу обновляем интерфейс, чтобы пользователь увидел изменения
+    await show_tariffs(callback, session)
